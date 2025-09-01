@@ -100,3 +100,14 @@ endif()
 if (ZXING_C_API)
     add_subdirectory (wrappers/c)
 endif()
+
+if(EMSCRIPTEN)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -s WASM=1 -s MODULARIZE=1 -s EXPORT_ES6=1")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -s ALLOW_MEMORY_GROWTH=1")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -s ENVIRONMENT='web,worker'")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --bind")
+
+    add_executable(zxing-wasm wasm/zxing_bindings.cpp)
+    target_link_libraries(zxing-wasm ZXing::ZXing)
+endif()
+

@@ -1,3 +1,9 @@
+# wasm
+
+build-wasm/
+
+#
+
 *.o
 *.so
 *.lib
