@@ -1,13 +1,15 @@
 #!/bin/bash
+
+# Source Emscripten SDK environment
+source ../emsdk/emsdk_env.sh
+
 mkdir -p build-wasm
 cd build-wasm
 
-emcmake cmake .. \
+emcmake cmake ../wrappers/wasm \
   -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_WRITERS=ON \
-  -DBUILD_READERS=ON \
-  -DBUILD_EXAMPLES=OFF \
-  -DBUILD_BLACKBOX_TESTS=OFF \
-  -DBUILD_UNIT_TESTS=OFF
+  -DZXING_WRITERS=ON \
+  -DZXING_READERS=ON \
+  -DZXING_EXAMPLES=OFF
 
 emmake make -j$(nproc)
