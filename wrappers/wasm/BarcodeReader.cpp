@@ -35,6 +35,11 @@ std::vector<ReadResult> readBarcodes(ImageView iv, bool tryHarder, bool tryRotat
 		opts.setTryRotate(tryRotate);
 		opts.setTryInvert(tryInvert);
 		opts.setTryDownscale(tryHarder);
+#ifdef ZXING_EXPERIMENTAL_API
+		// Enable morphological operations (closing filter) for better boundary detection
+		// This helps with white QR codes on black backgrounds
+		opts.setTryDenoise(tryHarder);
+#endif
 		opts.setFormats(BarcodeFormatsFromString(format));
 		opts.setMaxNumberOfSymbols(maxSymbols);
 //		opts.setReturnErrors(maxSymbols > 1);
