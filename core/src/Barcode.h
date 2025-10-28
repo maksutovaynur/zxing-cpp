@@ -64,7 +64,7 @@ class Result
 	Result& setReaderOptions(const ReaderOptions& opts);
 
 	friend Barcode MergeStructuredAppendSequence(const Barcodes&);
-	friend Barcodes ReadBarcodes(const ImageView&, const ReaderOptions&);
+	friend Barcodes ReadBarcodes(const ImageView&, const ReaderOptions&, void*);
 	friend Image WriteBarcodeToImage(const Barcode&, const WriterOptions&);
 	friend void IncrementLineCount(Barcode&);
 

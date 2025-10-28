@@ -17,6 +17,18 @@
 
 using namespace ZXing;
 
+struct DebugRect
+{
+	int x, y, width, height;
+};
+
+struct DebugInfo
+{
+	emscripten::val detectedRegions = emscripten::val::array(); // JavaScript array
+	int regionsProcessed = 0;
+	bool usedFallback = false;
+};
+
 struct ReadResult
 {
 	std::string format{};
@@ -25,6 +37,7 @@ struct ReadResult
 	std::string error{};
 	Position position{};
 	std::string symbologyIdentifier{};
+	DebugInfo debug{};
 };
 
 std::vector<ReadResult> readBarcodes(ImageView iv, bool tryHarder, bool tryRotate, bool tryInvert, const std::string& format, int maxSymbols)
@@ -44,12 +57,41 @@ std::vector<ReadResult> readBarcodes(ImageView iv, bool tryHarder, bool tryRotat
 		opts.setMaxNumberOfSymbols(maxSymbols);
 //		opts.setReturnErrors(maxSymbols > 1);
 
-		auto barcodes = ReadBarcodes(iv, opts);
+		// Create debug info structure to capture region detection data
+		// Note: This requires ReadBarcodes to accept DebugInfo* parameter
+		// The implementation is in ReadBarcode.cpp and uses internal DebugInfo struct
+		// We need to declare a compatible structure here
+		struct InternalDebugInfo {
+			struct SimpleRect { int x, y, width, height; };
+			std::vector<SimpleRect> detectedRegions;
+			int regionsProcessed = 0;
+			bool usedFallback = false;
+		};
+		InternalDebugInfo internalDebug;
+
+		auto barcodes = ReadBarcodes(iv, opts, reinterpret_cast<void*>(&internalDebug));
 
 		std::vector<ReadResult> readResults{};
-		readResults.reserve(barcodes.size());
+		readResults.reserve(std::max(barcodes.size(), size_t(1)));
 
 		thread_local const emscripten::val Uint8Array = emscripten::val::global("Uint8Array");
+
+		// Convert internal debug info to our WASM-compatible format
+		DebugInfo debugInfo;
+		debugInfo.regionsProcessed = internalDebug.regionsProcessed;
+		debugInfo.usedFallback = internalDebug.usedFallback;
+
+		// Create JavaScript array for regions
+		debugInfo.detectedRegions = emscripten::val::array();
+		for (size_t i = 0; i < internalDebug.detectedRegions.size(); ++i) {
+			const auto& rect = internalDebug.detectedRegions[i];
+			emscripten::val jsRect = emscripten::val::object();
+			jsRect.set("x", rect.x);
+			jsRect.set("y", rect.y);
+			jsRect.set("width", rect.width);
+			jsRect.set("height", rect.height);
+			debugInfo.detectedRegions.call<void>("push", jsRect);
+		}
 
 		for (auto&& barcode : barcodes) {
 			const ByteArray& bytes = barcode.bytes();
@@ -59,8 +101,15 @@ std::vector<ReadResult> readBarcodes(ImageView iv, bool tryHarder, bool tryRotat
 				Uint8Array.new_(emscripten::typed_memory_view(bytes.size(), bytes.data())),
 				ToString(barcode.error()),
 				barcode.position(),
-				barcode.symbologyIdentifier()
+				barcode.symbologyIdentifier(),
+				debugInfo
 			});
+		}
+
+		// If no barcodes found but we have debug info, return an empty result with debug info
+		int regionsLength = debugInfo.detectedRegions["length"].as<int>();
+		if (readResults.empty() && (debugInfo.usedFallback || regionsLength > 0)) {
+			readResults.push_back({"", "", {}, "No barcode found", {}, "", debugInfo});
 		}
 
 		return readResults;
@@ -103,13 +152,20 @@ EMSCRIPTEN_BINDINGS(BarcodeReader)
 {
 	using namespace emscripten;
 
+	// DebugInfo with JS array for detectedRegions
+	value_object<DebugInfo>("DebugInfo")
+		.field("detectedRegions", &DebugInfo::detectedRegions)
+		.field("regionsProcessed", &DebugInfo::regionsProcessed)
+		.field("usedFallback", &DebugInfo::usedFallback);
+
 	value_object<ReadResult>("ReadResult")
 		.field("format", &ReadResult::format)
 		.field("text", &ReadResult::text)
 		.field("bytes", &ReadResult::bytes)
 		.field("error", &ReadResult::error)
 		.field("position", &ReadResult::position)
-		.field("symbologyIdentifier", &ReadResult::symbologyIdentifier);
+		.field("symbologyIdentifier", &ReadResult::symbologyIdentifier)
+		.field("debug", &ReadResult::debug);
 
 	value_object<ZXing::PointI>("Point").field("x", &ZXing::PointI::x).field("y", &ZXing::PointI::y);
 

@@ -114,6 +114,13 @@ struct SimpleRect {
 	}
 };
 
+// Debug information structure for diagnostics
+struct DebugInfo {
+	std::vector<SimpleRect> detectedRegions;
+	int regionsProcessed = 0;
+	bool usedFallback = false;
+};
+
 // Helper to translate position by offset
 static Position Translate(const Position& pos, int offsetX, int offsetY)
 {
@@ -153,31 +160,60 @@ static ImageView ExtractRegion(const ImageView& iv, const SimpleRect& region, Lu
 }
 
 // Detect high-contrast regions that likely contain QR codes
-// Uses local variance analysis to find structured patterns
+// For black backgrounds with white QR codes, look for brighter regions
 static std::vector<SimpleRect> DetectQRCodeRegions(const ImageView& iv)
 {
 	std::vector<SimpleRect> regions;
 	const int width = iv.width();
 	const int height = iv.height();
-	const int blockSize = 20; // Smaller blocks to catch smaller QR codes
-	const int varianceThreshold = 500; // Lower threshold to be more sensitive
+	const int blockSize = 15; // Larger blocks to better capture QR patterns
 
-	// Grid to mark high-contrast blocks
-	std::vector<bool> highContrastBlocks((width / blockSize + 1) * (height / blockSize + 1), false);
+	const int blocksX = (width + blockSize - 1) / blockSize;
+	const int blocksY = (height + blockSize - 1) / blockSize;
 
-	// Scan image in blocks to find high-variance areas (QR codes have high contrast)
-	for (int by = 0; by < height - blockSize; by += blockSize) {
-		for (int bx = 0; bx < width - blockSize; bx += blockSize) {
-			// Calculate variance in this block
+	// Calculate overall image mean for comparison
+	long long totalSum = 0;
+	int totalCount = 0;
+	for (int y = 0; y < height; y += 2) { // Sample every other pixel for speed
+		for (int x = 0; x < width; x += 2) {
+			auto* src = iv.data(x, y);
+			uint8_t lum;
+			if (iv.format() == ImageFormat::Lum) {
+				lum = *src;
+			} else if (iv.format() == ImageFormat::RGB || iv.format() == ImageFormat::RGBA) {
+				lum = RGBToLum(src[0], src[1], src[2]);
+			} else if (iv.format() == ImageFormat::BGR || iv.format() == ImageFormat::BGRA) {
+				lum = RGBToLum(src[2], src[1], src[0]);
+			} else {
+				lum = RGBToLum(src[RedIndex(iv.format())], src[GreenIndex(iv.format())], src[BlueIndex(iv.format())]);
+			}
+			totalSum += lum;
+			totalCount++;
+		}
+	}
+	int imageMean = totalCount > 0 ? totalSum / totalCount : 128;
+
+	// Store block means
+	std::vector<int> blockMeans(blocksX * blocksY, 0);
+	std::vector<bool> interestingBlocks(blocksX * blocksY, false);
+
+	// Calculate mean for each block
+	for (int by = 0; by < blocksY; ++by) {
+		for (int bx = 0; bx < blocksX; ++bx) {
 			int sum = 0;
-			int sumSq = 0;
 			int count = 0;
+			int minLum = 255;
+			int maxLum = 0;
 
-			// Sample every pixel for better accuracy
-			for (int y = by; y < by + blockSize && y < height; ++y) {
-				for (int x = bx; x < bx + blockSize && x < width; ++x) {
-					uint8_t lum;
+			int startY = by * blockSize;
+			int startX = bx * blockSize;
+			int endY = std::min(startY + blockSize, height);
+			int endX = std::min(startX + blockSize, width);
+
+			for (int y = startY; y < endY; ++y) {
+				for (int x = startX; x < endX; ++x) {
 					auto* src = iv.data(x, y);
+					uint8_t lum;
 					if (iv.format() == ImageFormat::Lum) {
 						lum = *src;
 					} else if (iv.format() == ImageFormat::RGB || iv.format() == ImageFormat::RGBA) {
@@ -187,32 +223,62 @@ static std::vector<SimpleRect> DetectQRCodeRegions(const ImageView& iv)
 					} else {
 						lum = RGBToLum(src[RedIndex(iv.format())], src[GreenIndex(iv.format())], src[BlueIndex(iv.format())]);
 					}
-
 					sum += lum;
-					sumSq += lum * lum;
+					minLum = std::min(minLum, (int)lum);
+					maxLum = std::max(maxLum, (int)lum);
 					count++;
 				}
 			}
 
 			if (count > 0) {
+				int blockIdx = by * blocksX + bx;
 				int mean = sum / count;
-				int variance = (sumSq / count) - (mean * mean);
+				int range = maxLum - minLum;
+				blockMeans[blockIdx] = mean;
 
-				// Mark high-variance blocks (likely QR codes)
-				if (variance > varianceThreshold) {
-					int blockIdx = (by / blockSize) * (width / blockSize + 1) + (bx / blockSize);
-					highContrastBlocks[blockIdx] = true;
+				// Mark blocks that are significantly different from image mean
+				// OR have significant internal range (QR pattern variation)
+				// For black backgrounds: look for brighter blocks (mean > imageMean)
+				// For white backgrounds: look for darker blocks (mean < imageMean)
+				int meanDiff = std::abs(mean - imageMean);
+
+				if (meanDiff > 20 || range > 30) {
+					interestingBlocks[blockIdx] = true;
 				}
 			}
 		}
 	}
 
-	// Find connected components of high-contrast blocks and create bounding boxes
-	std::vector<bool> visited = highContrastBlocks;
-	for (int by = 0; by < height / blockSize; by++) {
-		for (int bx = 0; bx < width / blockSize; bx++) {
-			int blockIdx = by * (width / blockSize + 1) + bx;
-			if (highContrastBlocks[blockIdx] && !visited[blockIdx]) {
+	// Also mark blocks adjacent to interesting blocks with sufficient contrast
+	std::vector<bool> expandedBlocks = interestingBlocks;
+	for (int by = 0; by < blocksY; ++by) {
+		for (int bx = 0; bx < blocksX; ++bx) {
+			int blockIdx = by * blocksX + bx;
+			if (!interestingBlocks[blockIdx]) continue;
+
+			// Check 8 neighbors
+			for (int dy = -1; dy <= 1; ++dy) {
+				for (int dx = -1; dx <= 1; ++dx) {
+					if (dx == 0 && dy == 0) continue;
+					int ny = by + dy;
+					int nx = bx + dx;
+					if (ny >= 0 && ny < blocksY && nx >= 0 && nx < blocksX) {
+						int nidx = ny * blocksX + nx;
+						if (std::abs(blockMeans[blockIdx] - blockMeans[nidx]) > 15) {
+							expandedBlocks[nidx] = true;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Find connected components of interesting blocks and create bounding boxes
+	std::vector<bool> visited(blocksX * blocksY, false);
+	for (int by = 0; by < blocksY; by++) {
+		for (int bx = 0; bx < blocksX; bx++) {
+			int blockIdx = by * blocksX + bx;
+			if (expandedBlocks[blockIdx] && !visited[blockIdx]) {
 				// Found a new region - find its bounds
 				int minX = bx, maxX = bx;
 				int minY = by, maxY = by;
@@ -235,9 +301,9 @@ static std::vector<SimpleRect> DetectQRCodeRegions(const ImageView& iv)
 					for (auto [dx, dy] : {std::pair{-1,0}, {1,0}, {0,-1}, {0,1}}) {
 						int nx = cx + dx;
 						int ny = cy + dy;
-						if (nx >= 0 && nx < width / blockSize && ny >= 0 && ny < height / blockSize) {
-							int nidx = ny * (width / blockSize + 1) + nx;
-							if (highContrastBlocks[nidx] && !visited[nidx]) {
+						if (nx >= 0 && nx < blocksX && ny >= 0 && ny < blocksY) {
+							int nidx = ny * blocksX + nx;
+							if (expandedBlocks[nidx] && !visited[nidx]) {
 								visited[nidx] = true;
 								stack.push_back({nx, ny});
 							}
@@ -245,8 +311,9 @@ static std::vector<SimpleRect> DetectQRCodeRegions(const ImageView& iv)
 					}
 				}
 
-				// Create bounding rectangle with padding
-				const int padding = blockSize * 2; // Extra padding around QR code
+				// Create bounding rectangle with generous padding
+				// QR codes need extra space around finder patterns
+				const int padding = blockSize * 6; // Very generous padding
 				SimpleRect rect;
 				rect.x = std::max(0, minX * blockSize - padding);
 				rect.y = std::max(0, minY * blockSize - padding);
@@ -254,27 +321,232 @@ static std::vector<SimpleRect> DetectQRCodeRegions(const ImageView& iv)
 				rect.height = std::min(height - rect.y, (maxY - minY + 1) * blockSize + 2 * padding);
 
 				// Only add reasonably sized regions (likely to be QR codes)
+				// Minimum: at least 2x2 blocks (30x30 pixels with blockSize=15)
+				// Maximum: accept up to 95% of image
 				if (rect.width >= blockSize * 2 && rect.height >= blockSize * 2 &&
-				    rect.width <= width * 0.8 && rect.height <= height * 0.8) {
+				    rect.width <= width * 0.95 && rect.height <= height * 0.95) {
 					regions.push_back(rect);
 				}
 			}
 		}
 	}
 
-	return regions;
+	// Calculate high-variance area for each region and sort by area (highest first)
+	// QR codes have large areas with high local variance, while text has concentrated variance
+	struct RegionWithScore {
+		SimpleRect rect;
+		int highVarianceArea; // Number of pixels in high-variance blocks
+	};
+	std::vector<RegionWithScore> rankedRegions;
+
+	for (const auto& rect : regions) {
+		// Scan region in small blocks and count blocks with high variance
+		const int scanBlockSize = 5; // Small blocks to detect local variance
+		const int varianceThreshold = 100; // Threshold for "high variance"
+		int highVariancePixels = 0;
+
+		for (int by = rect.y; by < rect.y + rect.height; by += scanBlockSize) {
+			for (int bx = rect.x; bx < rect.x + rect.width; bx += scanBlockSize) {
+				int sum = 0;
+				int sumSq = 0;
+				int count = 0;
+				int minLum = 255;
+				int maxLum = 0;
+
+				// Calculate variance for this small block
+				int endY = std::min(by + scanBlockSize, std::min(rect.y + rect.height, height));
+				int endX = std::min(bx + scanBlockSize, std::min(rect.x + rect.width, width));
+
+				for (int y = by; y < endY; ++y) {
+					for (int x = bx; x < endX; ++x) {
+						auto* src = iv.data(x, y);
+						uint8_t lum;
+						if (iv.format() == ImageFormat::Lum) {
+							lum = *src;
+						} else if (iv.format() == ImageFormat::RGB || iv.format() == ImageFormat::RGBA) {
+							lum = RGBToLum(src[0], src[1], src[2]);
+						} else if (iv.format() == ImageFormat::BGR || iv.format() == ImageFormat::BGRA) {
+							lum = RGBToLum(src[2], src[1], src[0]);
+						} else {
+							lum = RGBToLum(src[RedIndex(iv.format())], src[GreenIndex(iv.format())], src[BlueIndex(iv.format())]);
+						}
+						sum += lum;
+						sumSq += lum * lum;
+						minLum = std::min(minLum, (int)lum);
+						maxLum = std::max(maxLum, (int)lum);
+						count++;
+					}
+				}
+
+				if (count > 0) {
+					int mean = sum / count;
+					int variance = (sumSq / count) - (mean * mean);
+					int range = maxLum - minLum;
+
+					// Count this block if it has high variance OR high range
+					if (variance > varianceThreshold || range > 40) {
+						highVariancePixels += count;
+					}
+				}
+			}
+		}
+
+		rankedRegions.push_back({rect, highVariancePixels});
+	}
+
+	// Sort by high-variance area (highest first) - prioritizes QR patterns over text
+	std::sort(rankedRegions.begin(), rankedRegions.end(),
+		[](const RegionWithScore& a, const RegionWithScore& b) {
+			return a.highVarianceArea > b.highVarianceArea;
+		});
+
+	// Return top 3 regions with highest variance area
+	std::vector<SimpleRect> topRegions;
+	for (size_t i = 0; i < std::min(size_t(3), rankedRegions.size()); ++i) {
+		topRegions.push_back(rankedRegions[i].rect);
+	}
+
+	return topRegions;
 }
 
-// Apply inversion filter to a region: (1-r)*(1-g)*(1-b)
+// Calculate percentage of dark ("black") pixels in a region
+// Returns value 0.0-1.0 representing fraction of pixels below threshold
+static double CalculateBlackPixelRatio(const ImageView& iv, const SimpleRect& rect)
+{
+	const int blackThreshold = 128; // Pixels below this are considered "black"
+	int blackCount = 0;
+	int totalCount = 0;
+
+	for (int y = rect.y; y < rect.y + rect.height && y < iv.height(); ++y) {
+		for (int x = rect.x; x < rect.x + rect.width && x < iv.width(); ++x) {
+			auto* src = iv.data(x, y);
+			uint8_t lum;
+			if (iv.format() == ImageFormat::Lum) {
+				lum = *src;
+			} else if (iv.format() == ImageFormat::RGB || iv.format() == ImageFormat::RGBA) {
+				lum = RGBToLum(src[0], src[1], src[2]);
+			} else if (iv.format() == ImageFormat::BGR || iv.format() == ImageFormat::BGRA) {
+				lum = RGBToLum(src[2], src[1], src[0]);
+			} else {
+				lum = RGBToLum(src[RedIndex(iv.format())], src[GreenIndex(iv.format())], src[BlueIndex(iv.format())]);
+			}
+
+			if (lum < blackThreshold) {
+				blackCount++;
+			}
+			totalCount++;
+		}
+	}
+
+	if (totalCount == 0) return 0.0;
+	return (double)blackCount / (double)totalCount;
+}
+
+// Optimize region by cropping to minimize black pixel count
+// This removes black background around white QR codes
+static SimpleRect OptimizeRegionBounds(const ImageView& iv, const SimpleRect& initialRect)
+{
+	SimpleRect rect = initialRect;
+	const int minSize = 50; // Don't crop smaller than 50x50 (QR codes need space)
+	const int cropStep = 3; // Crop 3 pixels at a time (less aggressive)
+
+	if (rect.width <= minSize || rect.height <= minSize) return rect;
+
+	// Calculate initial black pixel ratio
+	double blackRatio = CalculateBlackPixelRatio(iv, rect);
+	bool improved = true;
+	int iterations = 0;
+	const int maxIterations = 20; // Safety limit to prevent over-cropping
+
+	// Keep cropping while black pixel ratio decreases (removing black background)
+	while (improved && rect.width > minSize && rect.height > minSize && iterations < maxIterations) {
+		improved = false;
+		SimpleRect bestRect = rect;
+		double bestBlackRatio = blackRatio;
+		iterations++;
+
+		// Try cropping from each side
+		// Crop from left
+		if (rect.width - cropStep >= minSize) {
+			SimpleRect candidate = rect;
+			candidate.x += cropStep;
+			candidate.width -= cropStep;
+			double candBlackRatio = CalculateBlackPixelRatio(iv, candidate);
+			if (candBlackRatio < bestBlackRatio) {
+				bestBlackRatio = candBlackRatio;
+				bestRect = candidate;
+				improved = true;
+			}
+		}
+
+		// Crop from right
+		if (rect.width - cropStep >= minSize) {
+			SimpleRect candidate = rect;
+			candidate.width -= cropStep;
+			double candBlackRatio = CalculateBlackPixelRatio(iv, candidate);
+			if (candBlackRatio < bestBlackRatio) {
+				bestBlackRatio = candBlackRatio;
+				bestRect = candidate;
+				improved = true;
+			}
+		}
+
+		// Crop from top
+		if (rect.height - cropStep >= minSize) {
+			SimpleRect candidate = rect;
+			candidate.y += cropStep;
+			candidate.height -= cropStep;
+			double candBlackRatio = CalculateBlackPixelRatio(iv, candidate);
+			if (candBlackRatio < bestBlackRatio) {
+				bestBlackRatio = candBlackRatio;
+				bestRect = candidate;
+				improved = true;
+			}
+		}
+
+		// Crop from bottom
+		if (rect.height - cropStep >= minSize) {
+			SimpleRect candidate = rect;
+			candidate.height -= cropStep;
+			double candBlackRatio = CalculateBlackPixelRatio(iv, candidate);
+			if (candBlackRatio < bestBlackRatio) {
+				bestBlackRatio = candBlackRatio;
+				bestRect = candidate;
+				improved = true;
+			}
+		}
+
+		// If we found a better crop, apply it and continue
+		if (improved) {
+			rect = bestRect;
+			blackRatio = bestBlackRatio;
+		}
+	}
+
+	return rect;
+}
+
+// Replace black background pixels with white
+// This helps decode white QR codes on black backgrounds
+static void ReplaceBlackWithWhite(LumImage& img)
+{
+	const int blackThreshold = 128; // Pixels below this are considered background
+
+	for (int i = 0; i < img.width() * img.height(); ++i) {
+		uint8_t lum = img.data()[i];
+		// If pixel is black (below threshold), replace with white
+		if (lum < blackThreshold) {
+			img.data()[i] = 255; // White
+		}
+	}
+}
+
+// Apply inversion filter to a region: simple inversion for black backgrounds
 static void ApplyInversionFilter(LumImage& img)
 {
 	for (int i = 0; i < img.width() * img.height(); ++i) {
-		uint8_t lum = img.data()[i];
-		// Apply (1-L)^3 filter (grayscale equivalent of (1-r)*(1-g)*(1-b))
-		float normalized = lum / 255.0f;
-		float inverted = 1.0f - normalized;
-		float filtered = inverted * inverted * inverted;
-		img.data()[i] = static_cast<uint8_t>(filtered * 255.0f);
+		// Simple inversion: white QR on black -> black QR on white
+		img.data()[i] = 255 - img.data()[i];
 	}
 }
 
@@ -320,8 +592,9 @@ Barcode ReadBarcode(const ImageView& _iv, const ReaderOptions& opts)
 	return FirstOrDefault(ReadBarcodes(_iv, ReaderOptions(opts).setMaxNumberOfSymbols(1)));
 }
 
-Barcodes ReadBarcodes(const ImageView& _iv, const ReaderOptions& opts)
+Barcodes ReadBarcodes(const ImageView& _iv, const ReaderOptions& opts, void* debugOut)
 {
+	DebugInfo* debug = static_cast<DebugInfo*>(debugOut);
 	if (sizeof(PatternType) < 4 && (_iv.width() > 0xffff || _iv.height() > 0xffff))
 		throw std::invalid_argument("Maximum image width/height is 65535");
 
@@ -384,37 +657,81 @@ Barcodes ReadBarcodes(const ImageView& _iv, const ReaderOptions& opts)
 	if (res.empty() && opts.tryInvert() && opts.hasFormat(BarcodeFormat::QRCode | BarcodeFormat::MicroQRCode)) {
 		auto qrRegions = DetectQRCodeRegions(_iv);
 
-		for (const auto& region : qrRegions) {
-			// Extract the region
-			LumImage regionStorage;
-			auto regionView = ExtractRegion(_iv, region, regionStorage);
-			auto regionBitmap = CreateBitmap(opts.binarizer(), regionView);
+		// Populate debug info
+		if (debug) {
+			debug->usedFallback = true;
+			debug->regionsProcessed = 0;
 
-			// Try normal decode
-			auto r = reader.read(*regionBitmap);
-			if (r.isValid()) {
-				// Adjust position to original image coordinates
-				r.setPosition(Translate(r.position(), region.x, region.y));
-				r.setReaderOptions(opts);
-				res.push_back(std::move(r));
-				if (--maxSymbols <= 0)
-					return res;
-				continue;
-			}
-
-			// Try with inversion filter applied
-			ApplyInversionFilter(regionStorage);
-			regionBitmap = CreateBitmap(opts.binarizer(), regionStorage);
-			r = reader.read(*regionBitmap);
-			if (r.isValid()) {
-				r.setPosition(Translate(r.position(), region.x, region.y));
-				r.setReaderOptions(opts);
-				r.setIsInverted(true);
-				res.push_back(std::move(r));
-				if (--maxSymbols <= 0)
-					return res;
+			// If no regions detected, add a default full-image rect for debugging
+			if (qrRegions.empty()) {
+				SimpleRect fullImage;
+				fullImage.x = 0;
+				fullImage.y = 0;
+				fullImage.width = _iv.width();
+				fullImage.height = _iv.height();
+				debug->detectedRegions.push_back(fullImage);
+			} else {
+				debug->detectedRegions = qrRegions;
 			}
 		}
+
+		// Process regions in order from highest score to lowest
+		// Return immediately on first successful decode
+		for (auto region : qrRegions) {
+			if (debug) debug->regionsProcessed++;
+
+			// Skip optimization - use raw detected region
+			// Optimization might be removing QR code parts
+
+			// Extract the region
+			LumImage regionStorage;
+			ExtractRegion(_iv, region, regionStorage);
+
+			// Try multiple strategies with different binarizers
+			// This is important because different binarizers work better for different contrast scenarios
+			std::vector<Binarizer> binarizerStrategies = {
+				Binarizer::LocalAverage,      // HybridBinarizer - best for varying illumination
+				Binarizer::GlobalHistogram,   // Adaptive thresholding
+				Binarizer::FixedThreshold     // Simple threshold
+			};
+
+			for (auto binarizer : binarizerStrategies) {
+				// Try 1: Full inversion (white QR on black -> black QR on white)
+				// This is most effective for white QR codes on black backgrounds
+				LumImage invertedStorage(regionStorage.width(), regionStorage.height());
+				std::memcpy(invertedStorage.data(), regionStorage.data(), regionStorage.width() * regionStorage.height());
+				ApplyInversionFilter(invertedStorage);
+				auto regionBitmap = CreateBitmap(binarizer, invertedStorage);
+				auto r = reader.read(*regionBitmap);
+				if (r.isValid()) {
+					r.setPosition(Translate(r.position(), region.x, region.y));
+					r.setReaderOptions(opts);
+					r.setIsInverted(true);
+					res.push_back(std::move(r));
+					return res; // Return immediately on success
+				}
+
+				// Try 2: Normal decode (no modification)
+				regionBitmap = CreateBitmap(binarizer, regionStorage);
+				r = reader.read(*regionBitmap);
+				if (r.isValid()) {
+					r.setPosition(Translate(r.position(), region.x, region.y));
+					r.setReaderOptions(opts);
+					res.push_back(std::move(r));
+					return res; // Return immediately on success
+				}
+			}
+		}
+	}
+
+	// Always provide debug info when no detection happened (for diagnostics)
+	if (res.empty() && debug && debug->detectedRegions.empty()) {
+		SimpleRect fullImage;
+		fullImage.x = 0;
+		fullImage.y = 0;
+		fullImage.width = _iv.width();
+		fullImage.height = _iv.height();
+		debug->detectedRegions.push_back(fullImage);
 	}
 
 	return res;

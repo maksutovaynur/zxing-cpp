@@ -25,9 +25,10 @@ Barcode ReadBarcode(const ImageView& image, const ReaderOptions& options = {});
  *
  * @param image  view of the image data including layout and format
  * @param options  optional ReaderOptions to parameterize / speed up detection
+ * @param debugOut  optional pointer to receive debug information (internal use)
  * @return #Barcodes  list of barcodes found, may be empty
  */
-Barcodes ReadBarcodes(const ImageView& image, const ReaderOptions& options = {});
+Barcodes ReadBarcodes(const ImageView& image, const ReaderOptions& options = {}, void* debugOut = nullptr);
 
 } // ZXing
 
