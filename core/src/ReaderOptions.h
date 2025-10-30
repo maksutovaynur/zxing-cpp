@@ -66,6 +66,9 @@ class ReaderOptions
 #ifdef ZXING_EXPERIMENTAL_API
 	bool _tryDenoise               : 1;
 #endif
+	bool _tryFloodFill             : 1;
+	uint8_t _maxFloodFillCount     : 4;
+	bool _tryFindVarianceRegions   : 1;
 
 	uint8_t _minLineCount        = 2;
 	uint8_t _maxNumberOfSymbols  = 0xff;
@@ -94,6 +97,10 @@ public:
 		  ,
 		  _tryDenoise(0)
 #endif
+		  ,
+		  _tryFloodFill(0),
+		  _maxFloodFillCount(1),
+		  _tryFindVarianceRegions(0)
 	{}
 
 #define ZX_PROPERTY(TYPE, GETTER, SETTER, ...) \
@@ -120,6 +127,15 @@ public:
 	/// Also try detecting code after denoising (currently morphological closing filter for 2D symbologies only).
 	ZX_PROPERTY(bool, tryDenoise, setTryDenoise)
 #endif
+
+	/// Also try detecting code after applying flood fill preprocessing (experimental, for challenging backgrounds).
+	ZX_PROPERTY(bool, tryFloodFill, setTryFloodFill)
+
+	/// Maximum number of flood fill attempts (default 9, max 15).
+	ZX_PROPERTY(uint8_t, maxFloodFillCount, setMaxFloodFillCount)
+
+	/// Also try detecting code by finding high-variance regions (experimental, for QR codes in complex backgrounds).
+	ZX_PROPERTY(bool, tryFindVarianceRegions, setTryFindVarianceRegions)
 
 	/// Binarizer to use internally when using the ReadBarcode function
 	ZX_PROPERTY(Binarizer, binarizer, setBinarizer)

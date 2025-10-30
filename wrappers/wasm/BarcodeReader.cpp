@@ -27,6 +27,10 @@ struct DebugInfo
 	emscripten::val detectedRegions = emscripten::val::array(); // JavaScript array
 	int regionsProcessed = 0;
 	bool usedFallback = false;
+	bool usedFloodFill = false;
+	emscripten::val floodFillImages = emscripten::val::array(); // JavaScript array of Uint8Arrays
+	int floodFillWidth = 0;
+	int floodFillHeight = 0;
 };
 
 struct ReadResult
@@ -40,7 +44,7 @@ struct ReadResult
 	DebugInfo debug{};
 };
 
-std::vector<ReadResult> readBarcodes(ImageView iv, bool tryHarder, bool tryRotate, bool tryInvert, const std::string& format, int maxSymbols)
+std::vector<ReadResult> readBarcodes(ImageView iv, bool tryHarder, bool tryRotate, bool tryInvert, const std::string& format, int maxSymbols, bool tryFloodFill = false, int maxFloodFillCount = 1, bool tryFindVarianceRegions = false)
 {
 	try {
 		ReaderOptions opts;
@@ -53,6 +57,9 @@ std::vector<ReadResult> readBarcodes(ImageView iv, bool tryHarder, bool tryRotat
 		// This helps with white QR codes on black backgrounds
 		opts.setTryDenoise(tryHarder);
 #endif
+		opts.setTryFloodFill(tryFloodFill);
+		opts.setMaxFloodFillCount(maxFloodFillCount > 0 && maxFloodFillCount <= 15 ? maxFloodFillCount : 1);
+		opts.setTryFindVarianceRegions(tryFindVarianceRegions);
 		opts.setFormats(BarcodeFormatsFromString(format));
 		opts.setMaxNumberOfSymbols(maxSymbols);
 //		opts.setReturnErrors(maxSymbols > 1);
@@ -66,6 +73,10 @@ std::vector<ReadResult> readBarcodes(ImageView iv, bool tryHarder, bool tryRotat
 			std::vector<SimpleRect> detectedRegions;
 			int regionsProcessed = 0;
 			bool usedFallback = false;
+			bool usedFloodFill = false;
+			std::vector<std::vector<uint8_t>> floodFillImages;
+			int floodFillWidth = 0;
+			int floodFillHeight = 0;
 		};
 		InternalDebugInfo internalDebug;
 
@@ -80,6 +91,9 @@ std::vector<ReadResult> readBarcodes(ImageView iv, bool tryHarder, bool tryRotat
 		DebugInfo debugInfo;
 		debugInfo.regionsProcessed = internalDebug.regionsProcessed;
 		debugInfo.usedFallback = internalDebug.usedFallback;
+		debugInfo.usedFloodFill = internalDebug.usedFloodFill;
+		debugInfo.floodFillWidth = internalDebug.floodFillWidth;
+		debugInfo.floodFillHeight = internalDebug.floodFillHeight;
 
 		// Create JavaScript array for regions
 		debugInfo.detectedRegions = emscripten::val::array();
@@ -91,6 +105,14 @@ std::vector<ReadResult> readBarcodes(ImageView iv, bool tryHarder, bool tryRotat
 			jsRect.set("width", rect.width);
 			jsRect.set("height", rect.height);
 			debugInfo.detectedRegions.call<void>("push", jsRect);
+		}
+
+		// Create JavaScript array for flood fill images
+		debugInfo.floodFillImages = emscripten::val::array();
+		for (size_t i = 0; i < internalDebug.floodFillImages.size(); ++i) {
+			const auto& imageData = internalDebug.floodFillImages[i];
+			emscripten::val jsImage = Uint8Array.new_(emscripten::typed_memory_view(imageData.size(), imageData.data()));
+			debugInfo.floodFillImages.call<void>("push", jsImage);
 		}
 
 		for (auto&& barcode : barcodes) {
@@ -121,7 +143,7 @@ std::vector<ReadResult> readBarcodes(ImageView iv, bool tryHarder, bool tryRotat
 	return {};
 }
 
-std::vector<ReadResult> readBarcodesFromImage(int bufferPtr, int bufferLength, bool tryHarder, bool tryRotate, bool tryInvert, std::string format, int maxSymbols)
+std::vector<ReadResult> readBarcodesFromImage(int bufferPtr, int bufferLength, bool tryHarder, bool tryRotate, bool tryInvert, std::string format, int maxSymbols, bool tryFloodFill = false, int maxFloodFillCount = 1, bool tryFindVarianceRegions = false)
 {
 	int width, height, channels;
 	std::unique_ptr<stbi_uc, void (*)(void*)> buffer(
@@ -130,33 +152,37 @@ std::vector<ReadResult> readBarcodesFromImage(int bufferPtr, int bufferLength, b
 	if (buffer == nullptr)
 		return {{"", "", {}, "Error loading image"}};
 
-	return readBarcodes({buffer.get(), width, height, ImageFormat::Lum}, tryHarder, tryRotate, tryInvert, format, maxSymbols);
+	return readBarcodes({buffer.get(), width, height, ImageFormat::Lum}, tryHarder, tryRotate, tryInvert, format, maxSymbols, tryFloodFill, maxFloodFillCount, tryFindVarianceRegions);
 }
 
-ReadResult readBarcodeFromImage(int bufferPtr, int bufferLength, bool tryHarder, bool tryRotate, bool tryInvert, std::string format)
+ReadResult readBarcodeFromImage(int bufferPtr, int bufferLength, bool tryHarder, bool tryRotate, bool tryInvert, std::string format, bool tryFloodFill = false, int maxFloodFillCount = 1, bool tryFindVarianceRegions = false)
 {
-	return FirstOrDefault(readBarcodesFromImage(bufferPtr, bufferLength, tryHarder, tryRotate, tryInvert, format, 1));
+	return FirstOrDefault(readBarcodesFromImage(bufferPtr, bufferLength, tryHarder, tryRotate, tryInvert, format, 1, tryFloodFill, maxFloodFillCount, tryFindVarianceRegions));
 }
 
-std::vector<ReadResult> readBarcodesFromPixmap(int bufferPtr, int imgWidth, int imgHeight, bool tryHarder, bool tryRotate, bool tryInvert, std::string format, int maxSymbols)
+std::vector<ReadResult> readBarcodesFromPixmap(int bufferPtr, int imgWidth, int imgHeight, bool tryHarder, bool tryRotate, bool tryInvert, std::string format, int maxSymbols, bool tryFloodFill = false, int maxFloodFillCount = 3, bool tryFindVarianceRegions = false)
 {
-	return readBarcodes({reinterpret_cast<uint8_t*>(bufferPtr), imgWidth, imgHeight, ImageFormat::RGBA}, tryHarder, tryRotate, tryInvert, format, maxSymbols);
+	return readBarcodes({reinterpret_cast<uint8_t*>(bufferPtr), imgWidth, imgHeight, ImageFormat::RGBA}, tryHarder, tryRotate, tryInvert, format, maxSymbols, tryFloodFill, maxFloodFillCount, tryFindVarianceRegions);
 }
 
-ReadResult readBarcodeFromPixmap(int bufferPtr, int imgWidth, int imgHeight, bool tryHarder, bool tryRotate, bool tryInvert, std::string format)
+ReadResult readBarcodeFromPixmap(int bufferPtr, int imgWidth, int imgHeight, bool tryHarder, bool tryRotate, bool tryInvert, std::string format, bool tryFloodFill = false, int maxFloodFillCount = 3, bool tryFindVarianceRegions = false)
 {
-	return FirstOrDefault(readBarcodesFromPixmap(bufferPtr, imgWidth, imgHeight, tryHarder, tryRotate, tryInvert, format, 1));
+	return FirstOrDefault(readBarcodesFromPixmap(bufferPtr, imgWidth, imgHeight, tryHarder, tryRotate, tryInvert, format, 1, tryFloodFill, maxFloodFillCount, tryFindVarianceRegions));
 }
 
 EMSCRIPTEN_BINDINGS(BarcodeReader)
 {
 	using namespace emscripten;
 
-	// DebugInfo with JS array for detectedRegions
+	// DebugInfo with JS array for detectedRegions and floodFillImages
 	value_object<DebugInfo>("DebugInfo")
 		.field("detectedRegions", &DebugInfo::detectedRegions)
 		.field("regionsProcessed", &DebugInfo::regionsProcessed)
-		.field("usedFallback", &DebugInfo::usedFallback);
+		.field("usedFallback", &DebugInfo::usedFallback)
+		.field("usedFloodFill", &DebugInfo::usedFloodFill)
+		.field("floodFillImages", &DebugInfo::floodFillImages)
+		.field("floodFillWidth", &DebugInfo::floodFillWidth)
+		.field("floodFillHeight", &DebugInfo::floodFillHeight);
 
 	value_object<ReadResult>("ReadResult")
 		.field("format", &ReadResult::format)

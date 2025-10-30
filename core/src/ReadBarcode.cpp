@@ -119,6 +119,10 @@ struct DebugInfo {
 	std::vector<SimpleRect> detectedRegions;
 	int regionsProcessed = 0;
 	bool usedFallback = false;
+	bool usedFloodFill = false;
+	std::vector<std::vector<uint8_t>> floodFillImages; // Store flood fill images as raw luminance data
+	int floodFillWidth = 0;
+	int floodFillHeight = 0;
 };
 
 // Helper to translate position by offset
@@ -550,6 +554,163 @@ static void ApplyInversionFilter(LumImage& img)
 	}
 }
 
+// Random number generator helpers
+static uint32_t g_floodFillSeed = 12345;
+static uint32_t FloodFillRandom()
+{
+	g_floodFillSeed = g_floodFillSeed * 1103515245 + 12345;
+	return (g_floodFillSeed / 65536) % 32768;
+}
+
+// Get random point with higher probability on sides than center
+static std::pair<int, int> GetRandomPoint(int width, int height)
+{
+	// Use weighted random selection: sides have 2x probability of center
+	// Divide image into 3x3 grid: corners and edges (weight 2), center (weight 1)
+	int totalWeight = 12; // 8 edge regions * 2 + 1 center * 1 = 17, but we simplify
+	int choice = FloodFillRandom() % totalWeight;
+
+	int x, y;
+
+	// Choose a region based on weighted probability
+	if (choice < 2) {
+		// Left edge (weight 2)
+		x = FloodFillRandom() % (width / 4);
+		y = FloodFillRandom() % height;
+	} else if (choice < 4) {
+		// Right edge (weight 2)
+		x = width - 1 - (FloodFillRandom() % (width / 4));
+		y = FloodFillRandom() % height;
+	} else if (choice < 6) {
+		// Top edge (weight 2)
+		x = FloodFillRandom() % width;
+		y = FloodFillRandom() % (height / 4);
+	} else if (choice < 8) {
+		// Bottom edge (weight 2)
+		x = FloodFillRandom() % width;
+		y = height - 1 - (FloodFillRandom() % (height / 4));
+	} else {
+		// Center (lower probability)
+		x = width / 4 + (FloodFillRandom() % (width / 2));
+		y = height / 4 + (FloodFillRandom() % (height / 2));
+	}
+
+	return {x, y};
+}
+
+// Check if two colors are similar (fuzzy matching)
+static bool ColorsAreSimilar(uint8_t lum1, uint8_t lum2, int threshold = 27)
+{
+	return std::abs(static_cast<int>(lum1) - static_cast<int>(lum2)) <= threshold;
+}
+
+// Fuzzy flood fill algorithm
+// If point is dark, fill with white. If point is light, fill with black.
+static void FuzzyFloodFill(LumImage& img, int startX, int startY, int threshold = 27)
+{
+	if (startX < 0 || startX >= img.width() || startY < 0 || startY >= img.height())
+		return;
+
+	const int width = img.width();
+	const int height = img.height();
+
+	uint8_t startLum = img.data()[startY * width + startX];
+
+	// Determine fill color based on starting luminance
+	uint8_t fillColor;
+	if (startLum < 85) {
+		// Dark pixel -> fill with white
+		fillColor = 255;
+	} else if (startLum > 170) {
+		// Light pixel -> fill with black
+		fillColor = 0;
+	} else {
+		// Medium gray -> randomly choose black or white
+		fillColor = (FloodFillRandom() % 2) ? 255 : 0;
+	}
+
+	// Use scanline flood fill algorithm for proper area filling
+	std::vector<std::pair<int, int>> stack;
+	std::vector<bool> filled(width * height, false);
+
+	stack.push_back({startX, startY});
+
+	while (!stack.empty()) {
+		auto [x, y] = stack.back();
+		stack.pop_back();
+
+		// Find the leftmost pixel in this scanline
+		int left = x;
+		while (left > 0) {
+			int idx = y * width + (left - 1);
+			if (filled[idx])
+				break;
+			uint8_t lum = img.data()[idx];
+			if (!ColorsAreSimilar(lum, startLum, threshold))
+				break;
+			left--;
+		}
+
+		// Find the rightmost pixel in this scanline
+		int right = x;
+		while (right < width - 1) {
+			int idx = y * width + (right + 1);
+			if (filled[idx])
+				break;
+			uint8_t lum = img.data()[idx];
+			if (!ColorsAreSimilar(lum, startLum, threshold))
+				break;
+			right++;
+		}
+
+		// Fill the scanline from left to right
+		bool spanAbove = false;
+		bool spanBelow = false;
+
+		for (int i = left; i <= right; i++) {
+			int idx = y * width + i;
+			img.data()[idx] = fillColor;
+			filled[idx] = true;
+
+			// Check pixel above
+			if (y > 0) {
+				int idxAbove = (y - 1) * width + i;
+				if (!filled[idxAbove]) {
+					uint8_t lumAbove = img.data()[idxAbove];
+					if (ColorsAreSimilar(lumAbove, startLum, threshold)) {
+						if (!spanAbove) {
+							stack.push_back({i, y - 1});
+							spanAbove = true;
+						}
+					} else {
+						spanAbove = false;
+					}
+				} else {
+					spanAbove = false;
+				}
+			}
+
+			// Check pixel below
+			if (y < height - 1) {
+				int idxBelow = (y + 1) * width + i;
+				if (!filled[idxBelow]) {
+					uint8_t lumBelow = img.data()[idxBelow];
+					if (ColorsAreSimilar(lumBelow, startLum, threshold)) {
+						if (!spanBelow) {
+							stack.push_back({i, y + 1});
+							spanBelow = true;
+						}
+					} else {
+						spanBelow = false;
+					}
+				} else {
+					spanBelow = false;
+				}
+			}
+		}
+	}
+}
+
 ImageView SetupLumImageView(ImageView iv, LumImage& lum, const ReaderOptions& opts)
 {
 	if (iv.format() == ImageFormat::None)
@@ -585,6 +746,78 @@ std::unique_ptr<BinaryBitmap> CreateBitmap(ZXing::Binarizer binarizer, const Ima
 	case Binarizer::LocalAverage: return std::make_unique<HybridBinarizer>(iv);
 	}
 	return {}; // silence gcc warning
+}
+
+// Try flood fill preprocessing with multiple random attempts
+// Returns the modified bitmap and result if successful, otherwise returns empty result
+static std::pair<Barcode, bool> TryFloodFillPreprocessingHelper(const ImageView& _iv, const ReaderOptions& opts,
+                                      MultiFormatReader& reader, DebugInfo* debug, int maxAttempts = 9)
+{
+	if (debug) {
+		debug->usedFloodFill = true;
+		debug->floodFillWidth = 0;
+		debug->floodFillHeight = 0;
+	}
+
+	for (int attempt = 0; attempt < maxAttempts; ++attempt) {
+		// Create a working copy of the image
+		LumImage workingCopy;
+		ImageView iv = SetupLumImageView(_iv, workingCopy, opts);
+
+		// If workingCopy was created, use it; otherwise create from original
+		if (!workingCopy.data()) {
+			workingCopy = LumImage(iv.width(), iv.height());
+			std::memcpy(workingCopy.data(), iv.data(), iv.width() * iv.height());
+		} else {
+			// Already have a copy, make another one
+			LumImage temp(workingCopy.width(), workingCopy.height());
+			std::memcpy(temp.data(), workingCopy.data(), workingCopy.width() * workingCopy.height());
+			workingCopy = std::move(temp);
+		}
+
+		// Get random point (higher probability on edges)
+		auto [randX, randY] = GetRandomPoint(workingCopy.width(), workingCopy.height());
+
+		// Apply fuzzy flood fill from this point
+		FuzzyFloodFill(workingCopy, randX, randY, 27);
+
+		// Save flood fill image to debug info if detection fails
+		// We'll save it after trying detection
+		std::vector<uint8_t> imageCopy;
+		if (debug) {
+			int size = workingCopy.width() * workingCopy.height();
+			imageCopy.resize(size);
+			std::memcpy(imageCopy.data(), workingCopy.data(), size);
+			if (debug->floodFillWidth == 0) {
+				debug->floodFillWidth = workingCopy.width();
+				debug->floodFillHeight = workingCopy.height();
+			}
+		}
+
+		// Try detection on the modified image
+		auto bitmap = CreateBitmap(opts.binarizer(), workingCopy);
+		bool wasInverted = false;
+
+		// Try both normal and inverted
+		for (int invert = 0; invert <= static_cast<int>(opts.tryInvert()); ++invert) {
+			if (invert)
+				bitmap->invert();
+
+			auto r = reader.read(*bitmap);
+			if (r.isValid()) {
+				wasInverted = bitmap->inverted();
+				// Return result and inverted status, let ReadBarcodes set private fields
+				return {std::move(r), wasInverted};
+			}
+		}
+
+		// Detection failed, save the image to debug info
+		if (debug && !imageCopy.empty()) {
+			debug->floodFillImages.push_back(std::move(imageCopy));
+		}
+	}
+
+	return {{}, false};
 }
 
 Barcode ReadBarcode(const ImageView& _iv, const ReaderOptions& opts)
@@ -653,8 +886,19 @@ Barcodes ReadBarcodes(const ImageView& _iv, const ReaderOptions& opts, void* deb
 		}
 	}
 
-	// FALLBACK: If no QR codes found and tryInvert enabled, try region-based detection
-	if (res.empty() && opts.tryInvert() && opts.hasFormat(BarcodeFormat::QRCode | BarcodeFormat::MicroQRCode)) {
+	// FLOOD FILL PREPROCESSING: Try flood fill before region detection if enabled
+	if (res.empty() && opts.tryFloodFill() && opts.hasFormat(BarcodeFormat::QRCode | BarcodeFormat::MicroQRCode)) {
+		auto [result, wasInverted] = TryFloodFillPreprocessingHelper(_iv, opts, reader, debug, opts.maxFloodFillCount());
+		if (result.isValid()) {
+			result.setReaderOptions(opts);
+			result.setIsInverted(wasInverted);
+			res.push_back(std::move(result));
+			return res; // Successfully found barcode with flood fill
+		}
+	}
+
+	// FALLBACK: If no QR codes found and tryFindVarianceRegions enabled, try region-based detection
+	if (res.empty() && opts.tryFindVarianceRegions() && opts.hasFormat(BarcodeFormat::QRCode | BarcodeFormat::MicroQRCode)) {
 		auto qrRegions = DetectQRCodeRegions(_iv);
 
 		// Populate debug info
