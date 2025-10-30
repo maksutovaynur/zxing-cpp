@@ -759,6 +759,8 @@ static std::pair<Barcode, bool> TryFloodFillPreprocessingHelper(const ImageView&
 		debug->floodFillHeight = 0;
 	}
 
+	int threshold = opts.floodFillThreshold();
+
 	for (int attempt = 0; attempt < maxAttempts; ++attempt) {
 		// Create a working copy of the image
 		LumImage workingCopy;
@@ -779,7 +781,7 @@ static std::pair<Barcode, bool> TryFloodFillPreprocessingHelper(const ImageView&
 		auto [randX, randY] = GetRandomPoint(workingCopy.width(), workingCopy.height());
 
 		// Apply fuzzy flood fill from this point
-		FuzzyFloodFill(workingCopy, randX, randY, 27);
+		FuzzyFloodFill(workingCopy, randX, randY, threshold);
 
 		// Save flood fill image to debug info if detection fails
 		// We'll save it after trying detection

@@ -71,6 +71,7 @@ class ReaderOptions
 	bool _tryFindVarianceRegions   : 1;
 
 	uint8_t _minLineCount        = 2;
+	uint8_t _floodFillThreshold  = 27;
 	uint8_t _maxNumberOfSymbols  = 0xff;
 	uint16_t _downscaleThreshold = 500;
 	BarcodeFormats _formats      = BarcodeFormat::None;
@@ -131,8 +132,11 @@ public:
 	/// Also try detecting code after applying flood fill preprocessing (experimental, for challenging backgrounds).
 	ZX_PROPERTY(bool, tryFloodFill, setTryFloodFill)
 
-	/// Maximum number of flood fill attempts (default 9, max 15).
+	/// Maximum number of flood fill attempts (default 5, max 15).
 	ZX_PROPERTY(uint8_t, maxFloodFillCount, setMaxFloodFillCount)
+
+	/// Flood fill color similarity threshold (default 27, range 0-255).
+	ZX_PROPERTY(uint8_t, floodFillThreshold, setFloodFillThreshold)
 
 	/// Also try detecting code by finding high-variance regions (experimental, for QR codes in complex backgrounds).
 	ZX_PROPERTY(bool, tryFindVarianceRegions, setTryFindVarianceRegions)
