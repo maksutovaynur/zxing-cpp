@@ -562,51 +562,65 @@ static uint32_t FloodFillRandom()
 	return (g_floodFillSeed / 65536) % 32768;
 }
 
-// Get random point with higher probability on sides than center
-static std::pair<int, int> GetRandomPoint(int width, int height)
+// Get random point with optional edge bias
+// If edgeBias is true, uses edge-favoring distribution for both x and y independently
+// If edgeBias is false, uses uniform random distribution
+static std::pair<int, int> GetRandomPoint(int width, int height, bool edgeBias = true)
 {
-	// Use weighted random selection: sides have 2x probability of center
-	// Divide image into 3x3 grid: corners and edges (weight 2), center (weight 1)
-	int totalWeight = 12; // 8 edge regions * 2 + 1 center * 1 = 17, but we simplify
-	int choice = FloodFillRandom() % totalWeight;
-
 	int x, y;
 
-	// Choose a region based on weighted probability
-	if (choice < 2) {
-		// Left edge (weight 2)
-		x = FloodFillRandom() % (width / 4);
-		y = FloodFillRandom() % height;
-	} else if (choice < 4) {
-		// Right edge (weight 2)
-		x = width - 1 - (FloodFillRandom() % (width / 4));
-		y = FloodFillRandom() % height;
-	} else if (choice < 6) {
-		// Top edge (weight 2)
-		x = FloodFillRandom() % width;
-		y = FloodFillRandom() % (height / 4);
-	} else if (choice < 8) {
-		// Bottom edge (weight 2)
-		x = FloodFillRandom() % width;
-		y = height - 1 - (FloodFillRandom() % (height / 4));
+	if (edgeBias) {
+		// Apply edge-favoring distribution to x and y independently
+		// Weight: edges have 9x probability compared to center
+
+		// Select X coordinate with edge bias
+		int totalWeightX = 19; // 2 edges (left+right) * 9 weight + 1 center * 1 weight
+		int choiceX = FloodFillRandom() % totalWeightX;
+
+		if (choiceX < 9) {
+			// Left edge (weight 9) - leftmost 25% of width
+			x = FloodFillRandom() % (width / 4);
+		} else if (choiceX < 18) {
+			// Right edge (weight 9) - rightmost 25% of width
+			x = width - 1 - (FloodFillRandom() % (width / 4));
+		} else {
+			// Center (weight 1) - middle 50% of width
+			x = width / 4 + (FloodFillRandom() % (width / 2));
+		}
+
+		// Select Y coordinate with same edge bias
+		int totalWeightY = 19; // 2 edges (top+bottom) * 9 weight + 1 center * 1 weight
+		int choiceY = FloodFillRandom() % totalWeightY;
+
+		if (choiceY < 9) {
+			// Top edge (weight 9) - topmost 25% of height
+			y = FloodFillRandom() % (height / 4);
+		} else if (choiceY < 18) {
+			// Bottom edge (weight 9) - bottommost 25% of height
+			y = height - 1 - (FloodFillRandom() % (height / 4));
+		} else {
+			// Center (weight 1) - middle 50% of height
+			y = height / 4 + (FloodFillRandom() % (height / 2));
+		}
 	} else {
-		// Center (lower probability)
-		x = width / 4 + (FloodFillRandom() % (width / 2));
-		y = height / 4 + (FloodFillRandom() % (height / 2));
+		// Uniform random distribution
+		x = FloodFillRandom() % width;
+		y = FloodFillRandom() % height;
 	}
 
 	return {x, y};
 }
 
 // Check if two colors are similar (fuzzy matching)
-static bool ColorsAreSimilar(uint8_t lum1, uint8_t lum2, int threshold = 27)
+static bool ColorsAreSimilar(uint8_t lum1, uint8_t lum2, int threshold = 17)
 {
 	return std::abs(static_cast<int>(lum1) - static_cast<int>(lum2)) <= threshold;
 }
 
-// Fuzzy flood fill algorithm
+// Fuzzy flood fill algorithm with multiple starting points
 // If point is dark, fill with white. If point is light, fill with black.
-static void FuzzyFloodFill(LumImage& img, int startX, int startY, int threshold = 27)
+// C: number of starting points to use (all with same color threshold)
+static void FuzzyFloodFill(LumImage& img, int startX, int startY, int threshold = 17, int pointCount = 1, bool edgeBias = true)
 {
 	if (startX < 0 || startX >= img.width() || startY < 0 || startY >= img.height())
 		return;
@@ -633,7 +647,28 @@ static void FuzzyFloodFill(LumImage& img, int startX, int startY, int threshold 
 	std::vector<std::pair<int, int>> stack;
 	std::vector<bool> filled(width * height, false);
 
+	// Add first point to stack
 	stack.push_back({startX, startY});
+
+	// Select C-1 additional points with similar color to the first point
+	// Use same probability distribution (edge-biased or uniform) as first point
+	if (pointCount > 1) {
+		int pointsAdded = 1;
+		int maxAttempts = pointCount * 10; // Try up to 10x to find similar-colored points
+		int attempts = 0;
+
+		while (pointsAdded < pointCount && attempts < maxAttempts) {
+			auto [randX, randY] = GetRandomPoint(width, height, edgeBias);
+			uint8_t randLum = img.data()[randY * width + randX];
+
+			// Check if this point has similar color to the starting point
+			if (ColorsAreSimilar(randLum, startLum, threshold)) {
+				stack.push_back({randX, randY});
+				pointsAdded++;
+			}
+			attempts++;
+		}
+	}
 
 	while (!stack.empty()) {
 		auto [x, y] = stack.back();
@@ -777,11 +812,15 @@ static std::pair<Barcode, bool> TryFloodFillPreprocessingHelper(const ImageView&
 			workingCopy = std::move(temp);
 		}
 
-		// Get random point (higher probability on edges)
-		auto [randX, randY] = GetRandomPoint(workingCopy.width(), workingCopy.height());
+		// Get random point (edge-biased or uniform based on option)
+		bool edgeBias = opts.floodFillEdgeBias();
+		auto [randX, randY] = GetRandomPoint(workingCopy.width(), workingCopy.height(), edgeBias);
 
-		// Apply fuzzy flood fill from this point
-		FuzzyFloodFill(workingCopy, randX, randY, threshold);
+		// Apply fuzzy flood fill from multiple points
+		// This fills from C different points of the same color simultaneously
+		int pointCount = opts.floodFillPointCount();
+		pointCount = (pointCount > 0 && pointCount <= 10) ? pointCount : 3; // Clamp to 1-10 range
+		FuzzyFloodFill(workingCopy, randX, randY, threshold, pointCount, edgeBias);
 
 		// Save flood fill image to debug info if detection fails
 		// We'll save it after trying detection

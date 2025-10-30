@@ -44,7 +44,7 @@ struct ReadResult
 	DebugInfo debug{};
 };
 
-std::vector<ReadResult> readBarcodes(ImageView iv, bool tryHarder, bool tryRotate, bool tryInvert, const std::string& format, int maxSymbols, bool tryFloodFill = false, int maxFloodFillCount = 5, bool tryFindVarianceRegions = false, int floodFillThreshold = 27)
+std::vector<ReadResult> readBarcodes(ImageView iv, bool tryHarder, bool tryRotate, bool tryInvert, const std::string& format, int maxSymbols, bool tryFloodFill = false, int maxFloodFillCount = 5, bool tryFindVarianceRegions = false, int floodFillThreshold = 17, int floodFillPointCount = 3, bool floodFillEdgeBias = false)
 {
 	try {
 		ReaderOptions opts;
@@ -59,7 +59,9 @@ std::vector<ReadResult> readBarcodes(ImageView iv, bool tryHarder, bool tryRotat
 #endif
 		opts.setTryFloodFill(tryFloodFill);
 		opts.setMaxFloodFillCount(maxFloodFillCount > 0 && maxFloodFillCount <= 15 ? maxFloodFillCount : 5);
-		opts.setFloodFillThreshold(floodFillThreshold > 0 && floodFillThreshold <= 255 ? floodFillThreshold : 27);
+		opts.setFloodFillThreshold(floodFillThreshold > 0 && floodFillThreshold <= 255 ? floodFillThreshold : 17);
+		opts.setFloodFillPointCount(floodFillPointCount > 0 && floodFillPointCount <= 10 ? floodFillPointCount : 3);
+		opts.setFloodFillEdgeBias(floodFillEdgeBias);
 		opts.setTryFindVarianceRegions(tryFindVarianceRegions);
 		opts.setFormats(BarcodeFormatsFromString(format));
 		opts.setMaxNumberOfSymbols(maxSymbols);
@@ -144,7 +146,7 @@ std::vector<ReadResult> readBarcodes(ImageView iv, bool tryHarder, bool tryRotat
 	return {};
 }
 
-std::vector<ReadResult> readBarcodesFromImage(int bufferPtr, int bufferLength, bool tryHarder, bool tryRotate, bool tryInvert, std::string format, int maxSymbols, bool tryFloodFill = false, int maxFloodFillCount = 5, bool tryFindVarianceRegions = false, int floodFillThreshold = 27)
+std::vector<ReadResult> readBarcodesFromImage(int bufferPtr, int bufferLength, bool tryHarder, bool tryRotate, bool tryInvert, std::string format, int maxSymbols, bool tryFloodFill = false, int maxFloodFillCount = 5, bool tryFindVarianceRegions = false, int floodFillThreshold = 17, int floodFillPointCount = 3, bool floodFillEdgeBias = false)
 {
 	int width, height, channels;
 	std::unique_ptr<stbi_uc, void (*)(void*)> buffer(
@@ -153,22 +155,22 @@ std::vector<ReadResult> readBarcodesFromImage(int bufferPtr, int bufferLength, b
 	if (buffer == nullptr)
 		return {{"", "", {}, "Error loading image"}};
 
-	return readBarcodes({buffer.get(), width, height, ImageFormat::Lum}, tryHarder, tryRotate, tryInvert, format, maxSymbols, tryFloodFill, maxFloodFillCount, tryFindVarianceRegions, floodFillThreshold);
+	return readBarcodes({buffer.get(), width, height, ImageFormat::Lum}, tryHarder, tryRotate, tryInvert, format, maxSymbols, tryFloodFill, maxFloodFillCount, tryFindVarianceRegions, floodFillThreshold, floodFillPointCount, floodFillEdgeBias);
 }
 
-ReadResult readBarcodeFromImage(int bufferPtr, int bufferLength, bool tryHarder, bool tryRotate, bool tryInvert, std::string format, bool tryFloodFill = false, int maxFloodFillCount = 5, bool tryFindVarianceRegions = false, int floodFillThreshold = 27)
+ReadResult readBarcodeFromImage(int bufferPtr, int bufferLength, bool tryHarder, bool tryRotate, bool tryInvert, std::string format, bool tryFloodFill = false, int maxFloodFillCount = 5, bool tryFindVarianceRegions = false, int floodFillThreshold = 17, int floodFillPointCount = 3, bool floodFillEdgeBias = false)
 {
-	return FirstOrDefault(readBarcodesFromImage(bufferPtr, bufferLength, tryHarder, tryRotate, tryInvert, format, 1, tryFloodFill, maxFloodFillCount, tryFindVarianceRegions, floodFillThreshold));
+	return FirstOrDefault(readBarcodesFromImage(bufferPtr, bufferLength, tryHarder, tryRotate, tryInvert, format, 1, tryFloodFill, maxFloodFillCount, tryFindVarianceRegions, floodFillThreshold, floodFillPointCount, floodFillEdgeBias));
 }
 
-std::vector<ReadResult> readBarcodesFromPixmap(int bufferPtr, int imgWidth, int imgHeight, bool tryHarder, bool tryRotate, bool tryInvert, std::string format, int maxSymbols, bool tryFloodFill = false, int maxFloodFillCount = 3, bool tryFindVarianceRegions = false, int floodFillThreshold = 27)
+std::vector<ReadResult> readBarcodesFromPixmap(int bufferPtr, int imgWidth, int imgHeight, bool tryHarder, bool tryRotate, bool tryInvert, std::string format, int maxSymbols, bool tryFloodFill = false, int maxFloodFillCount = 3, bool tryFindVarianceRegions = false, int floodFillThreshold = 17, int floodFillPointCount = 3, bool floodFillEdgeBias = false)
 {
-	return readBarcodes({reinterpret_cast<uint8_t*>(bufferPtr), imgWidth, imgHeight, ImageFormat::RGBA}, tryHarder, tryRotate, tryInvert, format, maxSymbols, tryFloodFill, maxFloodFillCount, tryFindVarianceRegions, floodFillThreshold);
+	return readBarcodes({reinterpret_cast<uint8_t*>(bufferPtr), imgWidth, imgHeight, ImageFormat::RGBA}, tryHarder, tryRotate, tryInvert, format, maxSymbols, tryFloodFill, maxFloodFillCount, tryFindVarianceRegions, floodFillThreshold, floodFillPointCount, floodFillEdgeBias);
 }
 
-ReadResult readBarcodeFromPixmap(int bufferPtr, int imgWidth, int imgHeight, bool tryHarder, bool tryRotate, bool tryInvert, std::string format, bool tryFloodFill = false, int maxFloodFillCount = 3, bool tryFindVarianceRegions = false, int floodFillThreshold = 27)
+ReadResult readBarcodeFromPixmap(int bufferPtr, int imgWidth, int imgHeight, bool tryHarder, bool tryRotate, bool tryInvert, std::string format, bool tryFloodFill = false, int maxFloodFillCount = 3, bool tryFindVarianceRegions = false, int floodFillThreshold = 17, int floodFillPointCount = 3, bool floodFillEdgeBias = false)
 {
-	return FirstOrDefault(readBarcodesFromPixmap(bufferPtr, imgWidth, imgHeight, tryHarder, tryRotate, tryInvert, format, 1, tryFloodFill, maxFloodFillCount, tryFindVarianceRegions, floodFillThreshold));
+	return FirstOrDefault(readBarcodesFromPixmap(bufferPtr, imgWidth, imgHeight, tryHarder, tryRotate, tryInvert, format, 1, tryFloodFill, maxFloodFillCount, tryFindVarianceRegions, floodFillThreshold, floodFillPointCount, floodFillEdgeBias));
 }
 
 EMSCRIPTEN_BINDINGS(BarcodeReader)
