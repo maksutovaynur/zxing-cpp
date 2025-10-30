@@ -99,7 +99,7 @@ public:
 #endif
 		  ,
 		  _tryFloodFill(0),
-		  _maxFloodFillCount(1),
+		  _maxFloodFillCount(5),
 		  _tryFindVarianceRegions(0)
 	{}
 
